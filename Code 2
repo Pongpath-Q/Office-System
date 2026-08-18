@@ -1,0 +1,764 @@
+/************************************************
+ * BOARD 1 - FULL SYSTEM
+ *
+ * Ultrasonic
+ * TEMT6000
+ * Calibration Button
+ * LED x2
+ * Buzzer
+ ************************************************/
+
+
+// ================= PIN =================
+
+#define TRIG_PIN 5
+#define ECHO_PIN 19
+
+#define BUTTON_PIN 27
+
+#define LED_LIGHT 2
+#define LED_ALERT 15
+
+#define BUZZER_PIN 26
+
+#define LIGHT_SENSOR_PIN 35
+
+
+// ================= SETTINGS =================
+
+// ค่า Target เริ่มต้น
+float targetDistance = 20.0;
+
+// ยอมให้คลาดเคลื่อน ±2 cm
+#define DISTANCE_ERROR 2.0
+
+// แสงต่ำกว่า 55 = แสงไม่เพียงพอ
+#define LIGHT_THRESHOLD 55
+
+
+// ---------- Wrong Posture ----------
+
+// ต้องผิดท่าต่อเนื่อง 10 วินาที
+// ก่อน Buzzer จะเริ่มดัง
+#define WRONG_POSTURE_TIME 10000UL
+
+// Buzzer 1000 Hz
+#define BUZZER_FREQUENCY 1000
+
+// Buzzer ดังครั้งละ 0.3 วินาที
+#define POSTURE_BEEP_TIME 300UL
+
+// Buzzer ดังทุก 2 วินาที
+#define POSTURE_BEEP_INTERVAL 2000UL
+
+
+// ---------- Sitting ----------
+
+// 60 นาที
+#define SITTING_TIME_LIMIT 3600000UL
+
+// ถ้าไม่มีค่าระยะ 30 วินาที
+// ถือว่าไม่ได้อยู่ที่นั่ง
+#define NO_SEAT_TIMEOUT 30000UL
+
+// เสียงเตือนพัก 2 วินาที
+#define LONG_BEEP_TIME 2000UL
+
+
+// ================= VARIABLES =================
+
+// ---------- Calibration ----------
+
+bool calibrating = false;
+unsigned long calibrationStart = 0;
+
+
+// ---------- Button ----------
+
+bool lastButtonState = HIGH;
+unsigned long lastButtonChange = 0;
+
+#define BUTTON_DEBOUNCE 50UL
+
+
+// ---------- Posture ----------
+
+bool wrongPosture = false;
+unsigned long wrongPostureStart = 0;
+
+
+// ---------- Posture Buzzer ----------
+
+bool postureBuzzerOn = false;
+unsigned long postureBuzzerStart = 0;
+unsigned long lastPostureBeep = 0;
+
+
+// ---------- 60 Minute Buzzer ----------
+
+bool longBuzzerOn = false;
+unsigned long longBuzzerStart = 0;
+bool sixtyMinuteAlertGiven = false;
+
+
+// ---------- Sitting ----------
+
+bool sitting = false;
+
+unsigned long sittingStart = 0;
+unsigned long lastValidDistanceTime = 0;
+
+
+// ================= SETUP =================
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  // Ultrasonic
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+
+  // Button
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+
+  // LEDs
+  pinMode(LED_LIGHT, OUTPUT);
+  pinMode(LED_ALERT, OUTPUT);
+
+  digitalWrite(LED_LIGHT, LOW);
+  digitalWrite(LED_ALERT, LOW);
+
+
+  // Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  noTone(BUZZER_PIN);
+
+
+  // TEMT6000
+  pinMode(LIGHT_SENSOR_PIN, INPUT);
+
+  analogReadResolution(12);
+
+  analogSetPinAttenuation(
+    LIGHT_SENSOR_PIN,
+    ADC_11db
+  );
+
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("       BOARD 1 READY");
+  Serial.println("================================");
+
+  Serial.print("Target = ");
+  Serial.print(targetDistance, 1);
+  Serial.println(" cm");
+
+  Serial.println("================================");
+}
+
+
+// ================= ULTRASONIC =================
+
+float getDistance() {
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+
+  long duration =
+    pulseIn(ECHO_PIN, HIGH, 30000);
+
+
+  if (duration == 0) {
+    return -1;
+  }
+
+
+  float distance =
+    duration * 0.0343 / 2.0;
+
+
+  return distance;
+}
+
+
+// ================= CALIBRATION =================
+
+void handleCalibration(
+  unsigned long now,
+  float distance
+) {
+
+  bool buttonState =
+    digitalRead(BUTTON_PIN);
+
+
+  // ตรวจการกดปุ่ม
+  if (
+    lastButtonState == HIGH &&
+    buttonState == LOW &&
+    now - lastButtonChange >= BUTTON_DEBOUNCE
+  ) {
+
+    lastButtonChange = now;
+
+
+    if (!calibrating) {
+
+      calibrating = true;
+
+      calibrationStart = now;
+
+
+      // ระหว่าง Calibration
+      // ปิดการแจ้งเตือนทั้งหมด
+      wrongPosture = false;
+
+      postureBuzzerOn = false;
+
+      noTone(BUZZER_PIN);
+
+      digitalWrite(
+        LED_ALERT,
+        LOW
+      );
+
+
+      Serial.println();
+      Serial.println(">>> CALIBRATION START <<<");
+    }
+  }
+
+
+  lastButtonState = buttonState;
+
+
+  // Calibration กำลังทำงาน
+  if (calibrating) {
+
+    unsigned long elapsed =
+      now - calibrationStart;
+
+
+    // ครบ 5 วินาที
+    if (elapsed >= 5000) {
+
+      if (distance > 0) {
+
+        targetDistance = distance;
+
+
+        Serial.println();
+        Serial.println(">>> CALIBRATION COMPLETE <<<");
+
+        Serial.print("New Target : ");
+        Serial.print(targetDistance, 1);
+        Serial.println(" cm");
+
+      } else {
+
+        Serial.println(
+          "Calibration failed"
+        );
+      }
+
+
+      calibrating = false;
+    }
+  }
+}
+
+
+// ================= POSTURE =================
+
+void startPostureWarning(
+  unsigned long now
+) {
+
+  if (!wrongPosture) {
+
+    wrongPosture = true;
+
+    wrongPostureStart = now;
+
+
+    // สำคัญ:
+    // เมื่อเริ่มผิดท่าใหม่
+    // ต้องหยุดเสียงทันที
+    // และห้ามให้เสียงดังจนกว่าจะครบ 10 วิ
+
+    postureBuzzerOn = false;
+
+    noTone(BUZZER_PIN);
+
+
+    // สำคัญมาก
+    // ตั้งเป็นเวลาปัจจุบัน
+    // เพื่อให้คำนวณ 10 วินาทีจากตรงนี้
+
+    lastPostureBeep = now;
+
+
+    Serial.println(
+      ">>> POSTURE NOT OK - START TIMER <<<"
+    );
+  }
+}
+
+
+void stopPostureWarning() {
+
+  if (wrongPosture) {
+
+    wrongPosture = false;
+
+    postureBuzzerOn = false;
+
+    noTone(BUZZER_PIN);
+
+
+    Serial.println(
+      ">>> POSTURE OK - WARNING RESET <<<"
+    );
+  }
+}
+
+
+// ================= POSTURE BUZZER =================
+
+void updatePostureBuzzer(
+  unsigned long now
+) {
+
+  // ถ้าไม่ได้ผิดท่า
+  if (!wrongPosture) {
+
+    postureBuzzerOn = false;
+
+    noTone(BUZZER_PIN);
+
+    return;
+  }
+
+
+  // ============================
+  // ยังไม่ครบ 10 วินาที
+  // ============================
+
+  if (
+    now - wrongPostureStart <
+    WRONG_POSTURE_TIME
+  ) {
+
+    postureBuzzerOn = false;
+
+    noTone(BUZZER_PIN);
+
+    return;
+  }
+
+
+  // ============================
+  // Buzzer กำลังดัง
+  // ============================
+
+  if (postureBuzzerOn) {
+
+    if (
+      now - postureBuzzerStart >=
+      POSTURE_BEEP_TIME
+    ) {
+
+      noTone(BUZZER_PIN);
+
+      postureBuzzerOn = false;
+    }
+
+    return;
+  }
+
+
+  // ============================
+  // ครบ 10 วิแล้ว
+  // เริ่มเสียงครั้งแรกทันที
+  // ============================
+
+  if (
+    now - lastPostureBeep >=
+    POSTURE_BEEP_INTERVAL ||
+    lastPostureBeep == wrongPostureStart
+  ) {
+
+    tone(
+      BUZZER_PIN,
+      BUZZER_FREQUENCY
+    );
+
+    postureBuzzerOn = true;
+
+    postureBuzzerStart = now;
+
+    lastPostureBeep = now;
+  }
+}
+
+
+// ================= SITTING TIMER =================
+
+void updateSittingTimer(
+  unsigned long now,
+  float distance
+) {
+
+  // มีการวัดระยะได้
+  if (distance > 0) {
+
+    lastValidDistanceTime = now;
+
+
+    // เริ่มนับเวลานั่ง
+    if (!sitting) {
+
+      sitting = true;
+
+      sittingStart = now;
+
+      sixtyMinuteAlertGiven = false;
+    }
+  }
+
+
+  // ไม่มีระยะต่อเนื่อง 30 วิ
+  if (sitting) {
+
+    if (
+      now - lastValidDistanceTime >=
+      NO_SEAT_TIMEOUT
+    ) {
+
+      sitting = false;
+
+      sixtyMinuteAlertGiven = false;
+    }
+  }
+
+
+  // ครบ 60 นาที
+  if (
+    sitting &&
+    !sixtyMinuteAlertGiven &&
+    now - sittingStart >=
+    SITTING_TIME_LIMIT
+  ) {
+
+    tone(
+      BUZZER_PIN,
+      BUZZER_FREQUENCY
+    );
+
+    longBuzzerOn = true;
+
+    longBuzzerStart = now;
+
+    sixtyMinuteAlertGiven = true;
+  }
+
+
+  // หยุดเสียง 60 นาที
+  if (longBuzzerOn) {
+
+    if (
+      now - longBuzzerStart >=
+      LONG_BEEP_TIME
+    ) {
+
+      noTone(BUZZER_PIN);
+
+      longBuzzerOn = false;
+    }
+  }
+}
+
+
+// ================= LOOP =================
+
+void loop() {
+
+  unsigned long now = millis();
+
+
+  // ============================
+  // อ่าน Ultrasonic
+  // ============================
+
+  float distance = getDistance();
+
+
+  // ============================
+  // อ่าน TEMT6000
+  // ============================
+
+  int lightRaw =
+    analogRead(LIGHT_SENSOR_PIN);
+
+
+  // ============================
+  // Calibration
+  // ============================
+
+  handleCalibration(
+    now,
+    distance
+  );
+
+
+  // ============================
+  // Sitting Timer
+  // ============================
+
+  updateSittingTimer(
+    now,
+    distance
+  );
+
+
+  // ============================
+  // ตรวจท่านั่ง
+  // ============================
+
+  bool distanceError = false;
+
+
+  if (
+    distance > 0 &&
+    !calibrating
+  ) {
+
+    float minDistance =
+      targetDistance -
+      DISTANCE_ERROR;
+
+    float maxDistance =
+      targetDistance +
+      DISTANCE_ERROR;
+
+
+    if (
+      distance < minDistance ||
+      distance > maxDistance
+    ) {
+
+      distanceError = true;
+
+      startPostureWarning(now);
+
+    } else {
+
+      distanceError = false;
+
+      stopPostureWarning();
+    }
+  }
+
+
+  // ============================
+  // LED แจ้งเตือน
+  // ============================
+
+  if (
+    distanceError &&
+    !calibrating
+  ) {
+
+    digitalWrite(
+      LED_ALERT,
+      HIGH
+    );
+
+  } else {
+
+    digitalWrite(
+      LED_ALERT,
+      LOW
+    );
+  }
+
+
+  // ============================
+  // Buzzer ผิดท่า
+  // ============================
+
+  updatePostureBuzzer(now);
+
+
+  // ============================
+  // LED แสง
+  // ============================
+
+  if (
+    lightRaw < LIGHT_THRESHOLD
+  ) {
+
+    digitalWrite(
+      LED_LIGHT,
+      HIGH
+    );
+
+  } else {
+
+    digitalWrite(
+      LED_LIGHT,
+      LOW
+    );
+  }
+
+
+  // ============================
+  // SERIAL MONITOR
+  // ============================
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("          CURRENT STATUS");
+  Serial.println("================================");
+
+
+  // 1. ระยะปัจจุบัน + Target
+
+  Serial.print("Ultrasonic : ");
+
+  if (distance < 0) {
+
+    Serial.println("ERROR");
+
+  } else {
+
+    Serial.print(
+      distance,
+      1
+    );
+
+    Serial.println(" cm");
+  }
+
+
+  Serial.print("Target     : ");
+
+  Serial.print(
+    targetDistance,
+    1
+  );
+
+  Serial.println(" cm");
+
+
+  // 2. สถานะท่านั่ง
+
+  Serial.print("Posture    : ");
+
+  if (distance < 0) {
+
+    Serial.println(
+      "SENSOR ERROR"
+    );
+
+  } else if (calibrating) {
+
+    Serial.println(
+      "CALIBRATING"
+    );
+
+  } else if (distanceError) {
+
+    Serial.println(
+      "NOT OK"
+    );
+
+  } else {
+
+    Serial.println(
+      "OK"
+    );
+  }
+
+
+  // เวลาเตือนผิดท่า
+
+  Serial.print("Warning    : ");
+
+  if (
+    wrongPosture &&
+    !calibrating
+  ) {
+
+    unsigned long warningTime =
+      now - wrongPostureStart;
+
+    Serial.print(
+      warningTime / 1000
+    );
+
+    Serial.println(" sec");
+
+  } else {
+
+    Serial.println("0 sec");
+  }
+
+
+  // 3. เวลานั่ง
+
+  Serial.print("Sitting    : ");
+
+  if (sitting) {
+
+    unsigned long sittingTime =
+      now - sittingStart;
+
+
+    Serial.print(
+      sittingTime / 60000
+    );
+
+    Serial.print(" min ");
+
+    Serial.print(
+      (sittingTime / 1000) % 60
+    );
+
+    Serial.println(" sec");
+
+  } else {
+
+    Serial.println(
+      "NOT DETECTED"
+    );
+  }
+
+
+  // 4. ค่าแสง
+
+  Serial.print("Light RAW  : ");
+
+  Serial.println(
+    lightRaw
+  );
+
+
+  Serial.println("================================");
+
+
+  delay(300);
+}
