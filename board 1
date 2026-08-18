@@ -1,0 +1,1552 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include "esp_wifi.h"
+
+// =====================================================
+//                    BOARD 1 PIN
+// =====================================================
+
+#define ULTRA_TRIG       5
+#define ULTRA_ECHO       19
+
+#define LIGHT_SENSOR_PIN 35
+
+#define LED_DISTANCE     15
+#define LED_LIGHT        2
+#define LED_BOARD2       25
+
+#define BUZZER_PIN       26
+
+#define BUTTON_TARGET    27
+
+
+// =====================================================
+//                    SETTINGS
+// =====================================================
+
+float targetLocal = 40.0;
+
+const float TOLERANCE = 2.0;
+
+const float LIGHT_TARGET = 55.0;
+
+
+// =====================================================
+//                    BOARD 2 DEFAULT
+// =====================================================
+
+const float DEFAULT_B2_TARGET_1 = 2.0;
+const float DEFAULT_B2_TARGET_2 = 2.0;
+
+
+// =====================================================
+//                    TIMING
+// =====================================================
+
+const unsigned long TARGET_SETTING_TIME = 5000;
+
+const unsigned long WARNING_DELAY = 10000;
+
+const unsigned long BOARD2_TIMEOUT = 5000;
+
+// Buzzer: ปี๊บ 0.5 วิ / รอ 2 วิ
+const unsigned long BEEP_TIME = 500;
+const unsigned long BEEP_WAIT = 2000;
+
+
+// =====================================================
+//                    BOARD 2 MAC
+// =====================================================
+
+uint8_t board2Address[] = {
+  0xE0,
+  0x8C,
+  0xFE,
+  0xB6,
+  0xCF,
+  0x74
+};
+
+
+// =====================================================
+//                DATA FROM BOARD 2
+// =====================================================
+
+typedef struct {
+
+  float distance1;
+  float distance2;
+
+  float target1;
+  float target2;
+
+  bool sensor1OK;
+  bool sensor2OK;
+
+} Board2Data;
+
+Board2Data board2Data;
+
+
+// =====================================================
+//                BOARD 2 CONNECTION
+// =====================================================
+
+bool board2Connected = false;
+
+unsigned long lastBoard2Data = 0;
+
+
+// =====================================================
+//                TARGET SETTING
+// =====================================================
+
+bool settingTarget = false;
+
+unsigned long targetSettingStart = 0;
+
+float targetSum = 0;
+
+int targetSamples = 0;
+
+
+// =====================================================
+//                WARNING
+// =====================================================
+
+bool warningActive = false;
+
+unsigned long warningStart = 0;
+
+
+// =====================================================
+//                READ ULTRASONIC
+// =====================================================
+
+float readDistance() {
+
+  digitalWrite(
+    ULTRA_TRIG,
+    LOW
+  );
+
+  delayMicroseconds(5);
+
+  digitalWrite(
+    ULTRA_TRIG,
+    HIGH
+  );
+
+  delayMicroseconds(10);
+
+  digitalWrite(
+    ULTRA_TRIG,
+    LOW
+  );
+
+  unsigned long duration =
+    pulseIn(
+      ULTRA_ECHO,
+      HIGH,
+      40000
+    );
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  float distance =
+    duration * 0.0343 / 2.0;
+
+  return distance;
+}
+
+
+// =====================================================
+//                CHECK DISTANCE
+// =====================================================
+
+bool isDistanceOK(
+  float distance,
+  float target
+) {
+
+  if (distance < 0) {
+    return false;
+  }
+
+  return (
+    distance >= target - TOLERANCE &&
+    distance <= target + TOLERANCE
+  );
+}
+
+
+// =====================================================
+//                ESP-NOW RECEIVE
+// =====================================================
+
+void onDataRecv(
+  const esp_now_recv_info_t *info,
+  const uint8_t *incomingData,
+  int len
+) {
+
+  if (len == sizeof(Board2Data)) {
+
+    memcpy(
+      &board2Data,
+      incomingData,
+      sizeof(Board2Data)
+    );
+
+    board2Connected = true;
+
+    lastBoard2Data = millis();
+  }
+}
+
+
+// =====================================================
+//                    SETUP
+// =====================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(1000);
+
+
+  // ===================================================
+  // GPIO
+  // ===================================================
+
+  pinMode(
+    ULTRA_TRIG,
+    OUTPUT
+  );
+
+  pinMode(
+    ULTRA_ECHO,
+    INPUT
+  );
+
+  pinMode(
+    LIGHT_SENSOR_PIN,
+    INPUT
+  );
+
+  pinMode(
+    LED_DISTANCE,
+    OUTPUT
+  );
+
+  pinMode(
+    LED_LIGHT,
+    OUTPUT
+  );
+
+  pinMode(
+    LED_BOARD2,
+    OUTPUT
+  );
+
+  pinMode(
+    BUZZER_PIN,
+    OUTPUT
+  );
+
+  pinMode(
+    BUTTON_TARGET,
+    INPUT_PULLUP
+  );
+
+
+  // ===================================================
+  // INITIAL OUTPUT
+  // ===================================================
+
+  digitalWrite(
+    ULTRA_TRIG,
+    LOW
+  );
+
+  digitalWrite(
+    LED_DISTANCE,
+    LOW
+  );
+
+  // LED2 Active-Low
+  // เริ่มต้นให้ดับ
+  digitalWrite(
+    LED_LIGHT,
+    HIGH
+  );
+
+  digitalWrite(
+    LED_BOARD2,
+    LOW
+  );
+
+  noTone(
+    BUZZER_PIN
+  );
+
+
+  // ===================================================
+  // WIFI
+  // ===================================================
+
+  WiFi.mode(WIFI_STA);
+
+  delay(300);
+
+  esp_wifi_set_channel(
+    1,
+    WIFI_SECOND_CHAN_NONE
+  );
+
+
+  // ===================================================
+  // START MESSAGE
+  // ===================================================
+
+  Serial.println();
+
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.println(
+    "          BOARD 1 - MAIN SYSTEM"
+  );
+
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.print(
+    "Board 1 MAC : "
+  );
+
+  Serial.println(
+    WiFi.macAddress()
+  );
+
+
+  // ===================================================
+  // ESP-NOW
+  // ===================================================
+
+  if (
+    esp_now_init() != ESP_OK
+  ) {
+
+    Serial.println(
+      "ESP-NOW INIT FAILED"
+    );
+
+  } else {
+
+    esp_now_register_recv_cb(
+      onDataRecv
+    );
+
+
+    esp_now_peer_info_t peerInfo = {};
+
+    memcpy(
+      peerInfo.peer_addr,
+      board2Address,
+      6
+    );
+
+    peerInfo.channel = 1;
+
+    peerInfo.encrypt = false;
+
+
+    if (
+      esp_now_add_peer(
+        &peerInfo
+      ) == ESP_OK
+    ) {
+
+      Serial.println(
+        "BOARD 2 PEER READY"
+      );
+
+    } else {
+
+      Serial.println(
+        "BOARD 2 PEER FAILED"
+      );
+    }
+
+
+    Serial.println(
+      "ESP-NOW READY"
+    );
+  }
+
+
+  // ===================================================
+  // SETTINGS
+  // ===================================================
+
+  Serial.println(
+    "----------------------------------------"
+  );
+
+  Serial.print(
+    "Board 1 Target : "
+  );
+
+  Serial.print(
+    targetLocal,
+    1
+  );
+
+  Serial.println(
+    " cm"
+  );
+
+
+  Serial.print(
+    "Tolerance      : +/- "
+  );
+
+  Serial.print(
+    TOLERANCE,
+    1
+  );
+
+  Serial.println(
+    " cm"
+  );
+
+
+  Serial.print(
+    "Light Target   : "
+  );
+
+  Serial.println(
+    LIGHT_TARGET,
+    0
+  );
+
+
+  Serial.println(
+    "========================================"
+  );
+}
+
+
+// =====================================================
+//                    LOOP
+// =====================================================
+
+void loop() {
+
+  // ===================================================
+  // READ BOARD 1 ULTRASONIC
+  // ===================================================
+
+  float localDistance =
+    readDistance();
+
+
+  // ===================================================
+  // BUTTON GPIO27
+  // START TARGET SETTING
+  // ===================================================
+
+  static bool lastButtonState = HIGH;
+
+  bool buttonState =
+    digitalRead(
+      BUTTON_TARGET
+    );
+
+
+  if (
+    lastButtonState == HIGH &&
+    buttonState == LOW &&
+    !settingTarget
+  ) {
+
+    settingTarget = true;
+
+    targetSettingStart =
+      millis();
+
+    targetSum = 0;
+
+    targetSamples = 0;
+
+    Serial.println();
+
+    Serial.println(
+      ">>> TARGET SETTING START"
+    );
+
+    Serial.println(
+      "Adjust your position for 5 seconds..."
+    );
+
+    delay(200);
+  }
+
+
+  lastButtonState =
+    buttonState;
+
+
+  // ===================================================
+  // TARGET SETTING 5 SECONDS
+  // ===================================================
+
+  if (settingTarget) {
+
+    unsigned long elapsed =
+      millis() -
+      targetSettingStart;
+
+
+    float d =
+      readDistance();
+
+
+    if (d > 0) {
+
+      targetSum += d;
+
+      targetSamples++;
+    }
+
+
+    static int lastSecond = -1;
+
+    int currentSecond =
+      elapsed / 1000;
+
+
+    if (
+      currentSecond != lastSecond &&
+      currentSecond < 5
+    ) {
+
+      lastSecond =
+        currentSecond;
+
+      Serial.print(
+        "Setting Target: "
+      );
+
+      Serial.print(
+        5 - currentSecond
+      );
+
+      Serial.println(
+        " sec"
+      );
+    }
+
+
+    if (
+      elapsed >= TARGET_SETTING_TIME
+    ) {
+
+      if (
+        targetSamples > 0
+      ) {
+
+        targetLocal =
+          targetSum /
+          targetSamples;
+
+
+        Serial.println();
+
+        Serial.println(
+          ">>> NEW TARGET SET"
+        );
+
+        Serial.print(
+          "Target = "
+        );
+
+        Serial.print(
+          targetLocal,
+          1
+        );
+
+        Serial.println(
+          " cm"
+        );
+
+      } else {
+
+        Serial.println();
+
+        Serial.println(
+          ">>> TARGET SET FAILED"
+        );
+
+        Serial.println(
+          "Ultrasonic ERROR"
+        );
+      }
+
+
+      settingTarget = false;
+
+      targetSum = 0;
+
+      targetSamples = 0;
+
+      lastSecond = -1;
+    }
+  }
+
+
+  // ===================================================
+  // CHECK BOARD 2 CONNECTION
+  // ===================================================
+
+  if (
+    millis() - lastBoard2Data >
+    BOARD2_TIMEOUT
+  ) {
+
+    board2Connected = false;
+  }
+
+
+  // ===================================================
+  // BOARD 1 DISTANCE STATUS
+  // ===================================================
+
+  bool localOK =
+    isDistanceOK(
+      localDistance,
+      targetLocal
+    );
+
+
+  // ===================================================
+  // LED15
+  //
+  // ใกล้/ไกลเกิน ±2 cm = ON
+  // ===================================================
+
+  if (
+    localDistance > 0 &&
+    !localOK
+  ) {
+
+    digitalWrite(
+      LED_DISTANCE,
+      HIGH
+    );
+
+  } else {
+
+    digitalWrite(
+      LED_DISTANCE,
+      LOW
+    );
+  }
+
+
+  // ===================================================
+  // LIGHT SENSOR
+  // ===================================================
+
+  int lightRaw =
+    analogRead(
+      LIGHT_SENSOR_PIN
+    );
+
+
+  // ===================================================
+  // LED2 - LIGHT
+  //
+  // IMPORTANT:
+  //
+  // Light RAW < 55
+  // = มืด
+  // = LED ดับ
+  //
+  // Light RAW > 55
+  // = สว่าง
+  // = LED ติด
+  //
+  // LED ของวงจรนี้เป็น Active-Low
+  //
+  // LOW  = LED ติด
+  // HIGH = LED ดับ
+  // ===================================================
+
+  if (
+    lightRaw > LIGHT_TARGET
+  ) {
+
+    // สว่างกว่า 55
+    // LED ติด
+
+    digitalWrite(
+      LED_LIGHT,
+      LOW
+    );
+
+  } else {
+
+    // ต่ำกว่าหรือเท่ากับ 55
+    // LED ดับ
+
+    digitalWrite(
+      LED_LIGHT,
+      HIGH
+    );
+  }
+
+
+  // ===================================================
+  // BOARD 2 STATUS
+  // ===================================================
+
+  bool board2BothOK = false;
+
+  bool board2OneWrong = false;
+
+  bool board2BothWrong = false;
+
+
+  if (
+    board2Connected
+  ) {
+
+    bool u1OK =
+      board2Data.sensor1OK;
+
+    bool u2OK =
+      board2Data.sensor2OK;
+
+
+    // ทั้งคู่ OK
+    if (
+      u1OK &&
+      u2OK
+    ) {
+
+      board2BothOK = true;
+    }
+
+
+    // ทั้งคู่ผิด
+    // = ไม่มีคน
+    else if (
+      !u1OK &&
+      !u2OK
+    ) {
+
+      board2BothWrong = true;
+    }
+
+
+    // ผิดแค่ตัวเดียว
+    else {
+
+      board2OneWrong = true;
+    }
+  }
+
+
+  // ===================================================
+  // LED25
+  //
+  // Board 2 ผิด 1 ตัว = ON
+  //
+  // ผิดทั้ง 2 ตัว = OFF
+  // = ไม่มีคน
+  // ===================================================
+
+  if (
+    board2Connected &&
+    board2OneWrong
+  ) {
+
+    digitalWrite(
+      LED_BOARD2,
+      HIGH
+    );
+
+  } else {
+
+    digitalWrite(
+      LED_BOARD2,
+      LOW
+    );
+  }
+
+
+  // ===================================================
+  // NO PERSON
+  //
+  // Board 2 ผิดทั้ง 2 ตัว
+  // = ไม่มีคนนั่ง
+  //
+  // ไม่ว่า Board 1 จะผิดหรือถูก
+  // Buzzer ต้อง OFF
+  // ===================================================
+
+  bool noPerson = false;
+
+
+  if (
+    board2Connected &&
+    board2BothWrong
+  ) {
+
+    noPerson = true;
+  }
+
+
+  // ===================================================
+  // DETERMINE WARNING
+  // ===================================================
+
+  bool board1Warning = false;
+
+  bool board2Warning = false;
+
+
+  // ===================================================
+  // กำลังตั้ง Target
+  // ยังไม่เตือน
+  // ===================================================
+
+  if (
+    settingTarget
+  ) {
+
+    board1Warning = false;
+
+    board2Warning = false;
+  }
+
+
+  // ===================================================
+  // BOARD 2 DISCONNECTED
+  // Board 1 ทำงานเดี่ยว
+  // ===================================================
+
+  else if (
+    !board2Connected
+  ) {
+
+    if (
+      !localOK
+    ) {
+
+      board1Warning = true;
+    }
+  }
+
+
+  // ===================================================
+  // BOARD 2 CONNECTED
+  // ===================================================
+
+  else {
+
+    // B2 ผิดทั้งคู่
+    // = ไม่มีคน
+    // = ห้าม Buzzer
+
+    if (
+      board2BothWrong
+    ) {
+
+      board1Warning = false;
+
+      board2Warning = false;
+    }
+
+
+    // B2 ผิดแค่ตัวเดียว
+
+    else if (
+      board2OneWrong
+    ) {
+
+      // ถ้า B1 ผิดด้วย
+      // B1 มี Priority
+
+      if (
+        !localOK
+      ) {
+
+        board1Warning = true;
+
+        board2Warning = false;
+
+      } else {
+
+        board1Warning = false;
+
+        board2Warning = true;
+      }
+    }
+
+
+    // B2 ถูกทั้งคู่
+
+    else if (
+      board2BothOK
+    ) {
+
+      if (
+        !localOK
+      ) {
+
+        board1Warning = true;
+
+      } else {
+
+        board1Warning = false;
+      }
+    }
+  }
+
+
+  // ===================================================
+  // FINAL WARNING
+  // ===================================================
+
+  bool shouldWarn = false;
+
+
+  if (
+    noPerson
+  ) {
+
+    shouldWarn = false;
+  }
+
+  else if (
+    settingTarget
+  ) {
+
+    shouldWarn = false;
+  }
+
+  else if (
+    board1Warning
+  ) {
+
+    // Board 1 Priority
+    shouldWarn = true;
+  }
+
+  else if (
+    board2Warning
+  ) {
+
+    shouldWarn = true;
+  }
+
+  else {
+
+    shouldWarn = false;
+  }
+
+
+  // ===================================================
+  // 10 SECOND WARNING TIMER
+  // ===================================================
+
+  if (
+    shouldWarn
+  ) {
+
+    if (
+      !warningActive
+    ) {
+
+      warningActive = true;
+
+      warningStart =
+        millis();
+
+      Serial.println();
+
+      Serial.println(
+        ">>> WARNING TIMER START"
+      );
+    }
+
+  } else {
+
+    if (
+      warningActive
+    ) {
+
+      Serial.println();
+
+      Serial.println(
+        ">>> WARNING CANCELLED"
+      );
+    }
+
+
+    warningActive = false;
+
+    warningStart = 0;
+
+    noTone(
+      BUZZER_PIN
+    );
+  }
+
+
+  // ===================================================
+  // BUZZER
+  //
+  // ก่อนครบ 10 วิ = เงียบ
+  //
+  // ครบ 10 วิ:
+  //
+  // ปี๊บ 0.5 วิ
+  // รอ 2 วิ
+  // ปี๊บ 0.5 วิ
+  // รอ 2 วิ
+  // ...
+  // ===================================================
+
+  if (
+    warningActive &&
+    !noPerson &&
+    !settingTarget
+  ) {
+
+    unsigned long elapsed =
+      millis() -
+      warningStart;
+
+
+    // ก่อนครบ 10 วินาที
+
+    if (
+      elapsed < WARNING_DELAY
+    ) {
+
+      noTone(
+        BUZZER_PIN
+      );
+    }
+
+
+    // ครบ 10 วินาทีแล้ว
+
+    else {
+
+      unsigned long cycle =
+        (
+          elapsed -
+          WARNING_DELAY
+        ) %
+        (
+          BEEP_TIME +
+          BEEP_WAIT
+        );
+
+
+      // ปี๊บ
+
+      if (
+        cycle < BEEP_TIME
+      ) {
+
+        tone(
+          BUZZER_PIN,
+          1000
+        );
+
+      }
+
+      // รอ
+
+      else {
+
+        noTone(
+          BUZZER_PIN
+        );
+      }
+    }
+  }
+
+  else {
+
+    noTone(
+      BUZZER_PIN
+    );
+  }
+
+
+  // ===================================================
+  // SERIAL MONITOR
+  // ===================================================
+
+  static unsigned long lastDisplay = 0;
+
+
+  if (
+    millis() - lastDisplay >= 1000
+  ) {
+
+    lastDisplay =
+      millis();
+
+
+    Serial.println();
+
+    Serial.println(
+      "========================================"
+    );
+
+
+    // =================================================
+    // BOARD 1
+    // =================================================
+
+    Serial.println(
+      "BOARD 1"
+    );
+
+
+    Serial.print(
+      "Ultrasonic : "
+    );
+
+
+    if (
+      localDistance < 0
+    ) {
+
+      Serial.println(
+        "ERROR"
+      );
+
+    } else {
+
+      Serial.print(
+        localDistance,
+        1
+      );
+
+      Serial.println(
+        " cm"
+      );
+    }
+
+
+    Serial.print(
+      "Target     : "
+    );
+
+    Serial.print(
+      targetLocal,
+      1
+    );
+
+    Serial.println(
+      " cm"
+    );
+
+
+    Serial.print(
+      "Range      : "
+    );
+
+    Serial.print(
+      targetLocal -
+      TOLERANCE,
+      1
+    );
+
+    Serial.print(
+      " - "
+    );
+
+    Serial.print(
+      targetLocal +
+      TOLERANCE,
+      1
+    );
+
+    Serial.println(
+      " cm"
+    );
+
+
+    Serial.print(
+      "Distance   : "
+    );
+
+    Serial.println(
+      localOK
+      ? "OK"
+      : "NOT OK"
+    );
+
+
+    Serial.print(
+      "Light RAW  : "
+    );
+
+    Serial.print(
+      lightRaw
+    );
+
+    Serial.print(
+      " / Target "
+    );
+
+    Serial.println(
+      LIGHT_TARGET,
+      0
+    );
+
+
+    // =================================================
+    // BOARD 2
+    // =================================================
+
+    Serial.println();
+
+    Serial.println(
+      "BOARD 2"
+    );
+
+
+    Serial.print(
+      "Connection : "
+    );
+
+    Serial.println(
+      board2Connected
+      ? "CONNECTED"
+      : "DISCONNECTED"
+    );
+
+
+    if (
+      board2Connected
+    ) {
+
+      Serial.print(
+        "U1 : "
+      );
+
+      Serial.print(
+        board2Data.distance1,
+        1
+      );
+
+      Serial.print(
+        " / Target "
+      );
+
+      Serial.print(
+        board2Data.target1,
+        1
+      );
+
+      Serial.print(
+        " cm : "
+      );
+
+      Serial.println(
+        board2Data.sensor1OK
+        ? "OK"
+        : "NOT OK"
+      );
+
+
+      Serial.print(
+        "U2 : "
+      );
+
+      Serial.print(
+        board2Data.distance2,
+        1
+      );
+
+      Serial.print(
+        " / Target "
+      );
+
+      Serial.print(
+        board2Data.target2,
+        1
+      );
+
+      Serial.print(
+        " cm : "
+      );
+
+      Serial.println(
+        board2Data.sensor2OK
+        ? "OK"
+        : "NOT OK"
+      );
+
+
+      Serial.print(
+        "Status     : "
+      );
+
+
+      if (
+        board2BothWrong
+      ) {
+
+        Serial.println(
+          "NO PERSON"
+        );
+
+      }
+
+      else if (
+        board2OneWrong
+      ) {
+
+        Serial.println(
+          "WRONG - 1 SENSOR"
+        );
+
+      }
+
+      else {
+
+        Serial.println(
+          "OK"
+        );
+      }
+    }
+
+
+    // =================================================
+    // SYSTEM
+    // =================================================
+
+    Serial.println();
+
+    Serial.println(
+      "SYSTEM"
+    );
+
+
+    Serial.print(
+      "Seat       : "
+    );
+
+
+    if (
+      noPerson
+    ) {
+
+      Serial.println(
+        "NO PERSON"
+      );
+
+    } else {
+
+      Serial.println(
+        "OCCUPIED"
+      );
+    }
+
+
+    Serial.print(
+      "Warning    : "
+    );
+
+
+    if (
+      warningActive
+    ) {
+
+      unsigned long sec =
+        (
+          millis() -
+          warningStart
+        ) / 1000;
+
+
+      if (
+        sec < 10
+      ) {
+
+        Serial.print(
+          sec
+        );
+
+        Serial.println(
+          " / 10 sec"
+        );
+
+      } else {
+
+        Serial.println(
+          "ACTIVE"
+        );
+      }
+
+    } else {
+
+      Serial.println(
+        "OFF"
+      );
+    }
+
+
+    Serial.print(
+      "Buzzer Src : "
+    );
+
+
+    if (
+      noPerson
+    ) {
+
+      Serial.println(
+        "NONE"
+      );
+
+    }
+
+    else if (
+      board1Warning
+    ) {
+
+      Serial.println(
+        "BOARD 1"
+      );
+
+    }
+
+    else if (
+      board2Warning
+    ) {
+
+      Serial.println(
+        "BOARD 2"
+      );
+
+    }
+
+    else {
+
+      Serial.println(
+        "NONE"
+      );
+    }
+
+
+    // =================================================
+    // OUTPUT
+    // =================================================
+
+    Serial.println();
+
+    Serial.println(
+      "OUTPUT"
+    );
+
+
+    Serial.print(
+      "LED15      : "
+    );
+
+    Serial.println(
+      digitalRead(
+        LED_DISTANCE
+      )
+      ? "ON"
+      : "OFF"
+    );
+
+
+    Serial.print(
+      "LED2       : "
+    );
+
+    Serial.println(
+      digitalRead(
+        LED_LIGHT
+      ) == LOW
+      ? "ON"
+      : "OFF"
+    );
+
+
+    Serial.print(
+      "LED25      : "
+    );
+
+    Serial.println(
+      digitalRead(
+        LED_BOARD2
+      )
+      ? "ON"
+      : "OFF"
+    );
+
+
+    Serial.print(
+      "Buzzer     : "
+    );
+
+
+    if (
+      noPerson
+    ) {
+
+      Serial.println(
+        "OFF"
+      );
+
+    }
+
+    else if (
+      warningActive &&
+      millis() - warningStart >=
+      WARNING_DELAY
+    ) {
+
+      Serial.println(
+        "BEEP"
+      );
+
+    }
+
+    else {
+
+      Serial.println(
+        "OFF"
+      );
+    }
+
+
+    Serial.println(
+      "========================================"
+    );
+  }
+
+
+  delay(50);
+}
