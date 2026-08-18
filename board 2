@@ -1,0 +1,1035 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include "esp_wifi.h"
+
+// =====================================================
+//                    BOARD 2 PIN
+// =====================================================
+
+// Ultrasonic ตัวที่ 1
+#define ULTRA1_TRIG  5
+#define ULTRA1_ECHO  19
+
+// Ultrasonic ตัวที่ 2
+#define ULTRA2_TRIG  27
+#define ULTRA2_ECHO  25
+
+// ปุ่มตั้ง Target ทั้ง 2 ตัว
+#define BUTTON_TARGET 33
+
+
+// =====================================================
+//                    SETTINGS
+// =====================================================
+
+// Target เริ่มต้น
+float target1 = 2.0;
+float target2 = 2.0;
+
+// ยอมให้คลาดเคลื่อน ±2 cm
+const float TOLERANCE = 2.0;
+
+// เวลาสำหรับปรับ Target
+const unsigned long TARGET_SETTING_TIME = 5000;
+
+
+// =====================================================
+//                    ESP-NOW
+// =====================================================
+
+// Broadcast Address
+// ไม่ต้องใส่ MAC ของ Board 1
+uint8_t broadcastAddress[] = {
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF,
+  0xFF
+};
+
+
+// =====================================================
+//                DATA TO BOARD 1
+// =====================================================
+//
+// ต้องตรงกับ struct ที่ Board 1 ใช้
+//
+
+typedef struct {
+
+  float distance1;
+  float distance2;
+
+  float target1;
+  float target2;
+
+  bool sensor1OK;
+  bool sensor2OK;
+
+} Board2Data;
+
+
+Board2Data dataToSend;
+
+
+// =====================================================
+//                TARGET SETTING
+// =====================================================
+
+bool settingTarget = false;
+
+unsigned long targetSettingStart = 0;
+
+
+// เก็บ "ค่าล่าสุด" ที่อ่านได้ระหว่าง 5 วินาที
+float lastDistance1 = -1;
+float lastDistance2 = -1;
+
+
+// =====================================================
+//                READ ULTRASONIC 1
+// =====================================================
+
+float readDistance1() {
+
+  digitalWrite(
+    ULTRA1_TRIG,
+    LOW
+  );
+
+  delayMicroseconds(5);
+
+  digitalWrite(
+    ULTRA1_TRIG,
+    HIGH
+  );
+
+  delayMicroseconds(10);
+
+  digitalWrite(
+    ULTRA1_TRIG,
+    LOW
+  );
+
+  unsigned long duration =
+    pulseIn(
+      ULTRA1_ECHO,
+      HIGH,
+      40000
+    );
+
+  if (duration == 0) {
+
+    return -1;
+  }
+
+  return duration * 0.0343 / 2.0;
+}
+
+
+// =====================================================
+//                READ ULTRASONIC 2
+// =====================================================
+
+float readDistance2() {
+
+  digitalWrite(
+    ULTRA2_TRIG,
+    LOW
+  );
+
+  delayMicroseconds(5);
+
+  digitalWrite(
+    ULTRA2_TRIG,
+    HIGH
+  );
+
+  delayMicroseconds(10);
+
+  digitalWrite(
+    ULTRA2_TRIG,
+    LOW
+  );
+
+  unsigned long duration =
+    pulseIn(
+      ULTRA2_ECHO,
+      HIGH,
+      40000
+    );
+
+  if (duration == 0) {
+
+    return -1;
+  }
+
+  return duration * 0.0343 / 2.0;
+}
+
+
+// =====================================================
+//                CHECK TARGET
+// =====================================================
+
+bool isDistanceOK(
+  float distance,
+  float target
+) {
+
+  // อ่านค่าไม่ได้
+  if (distance < 0) {
+
+    return false;
+  }
+
+  return (
+    distance >= target - TOLERANCE &&
+    distance <= target + TOLERANCE
+  );
+}
+
+
+// =====================================================
+//                SEND DATA TO BOARD 1
+// =====================================================
+
+void sendData(
+  float distance1,
+  float distance2
+) {
+
+  dataToSend.distance1 =
+    distance1;
+
+  dataToSend.distance2 =
+    distance2;
+
+  dataToSend.target1 =
+    target1;
+
+  dataToSend.target2 =
+    target2;
+
+  dataToSend.sensor1OK =
+    isDistanceOK(
+      distance1,
+      target1
+    );
+
+  dataToSend.sensor2OK =
+    isDistanceOK(
+      distance2,
+      target2
+    );
+
+
+  esp_now_send(
+    broadcastAddress,
+    (uint8_t *)&dataToSend,
+    sizeof(dataToSend)
+  );
+}
+
+
+// =====================================================
+//                    SETUP
+// =====================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  delay(1000);
+
+
+  // ===================================================
+  // GPIO
+  // ===================================================
+
+  pinMode(
+    ULTRA1_TRIG,
+    OUTPUT
+  );
+
+  pinMode(
+    ULTRA1_ECHO,
+    INPUT
+  );
+
+
+  pinMode(
+    ULTRA2_TRIG,
+    OUTPUT
+  );
+
+  pinMode(
+    ULTRA2_ECHO,
+    INPUT
+  );
+
+
+  pinMode(
+    BUTTON_TARGET,
+    INPUT_PULLUP
+  );
+
+
+  digitalWrite(
+    ULTRA1_TRIG,
+    LOW
+  );
+
+  digitalWrite(
+    ULTRA2_TRIG,
+    LOW
+  );
+
+
+  // ===================================================
+  // WIFI
+  // ===================================================
+
+  WiFi.mode(WIFI_STA);
+
+  delay(300);
+
+
+  // Board 1 และ Board 2 ใช้ Channel 1
+  esp_wifi_set_channel(
+    1,
+    WIFI_SECOND_CHAN_NONE
+  );
+
+
+  // ===================================================
+  // SERIAL START
+  // ===================================================
+
+  Serial.println();
+
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.println(
+    "             BOARD 2"
+  );
+
+  Serial.println(
+    "========================================"
+  );
+
+
+  Serial.print(
+    "Board 2 MAC : "
+  );
+
+  Serial.println(
+    WiFi.macAddress()
+  );
+
+
+  // ===================================================
+  // ESP-NOW INIT
+  // ===================================================
+
+  if (
+    esp_now_init() != ESP_OK
+  ) {
+
+    Serial.println(
+      "ESP-NOW INIT FAILED"
+    );
+
+    return;
+  }
+
+
+  Serial.println(
+    "ESP-NOW READY"
+  );
+
+
+  // ===================================================
+  // ADD BROADCAST PEER
+  // ===================================================
+
+  esp_now_peer_info_t peerInfo = {};
+
+  memcpy(
+    peerInfo.peer_addr,
+    broadcastAddress,
+    6
+  );
+
+  peerInfo.channel = 1;
+
+  peerInfo.encrypt = false;
+
+
+  if (
+    esp_now_add_peer(
+      &peerInfo
+    ) == ESP_OK
+  ) {
+
+    Serial.println(
+      "BROADCAST PEER READY"
+    );
+
+  } else {
+
+    Serial.println(
+      "BROADCAST PEER FAILED"
+    );
+  }
+
+
+  // ===================================================
+  // INITIAL SETTINGS
+  // ===================================================
+
+  Serial.println(
+    "----------------------------------------"
+  );
+
+
+  Serial.print(
+    "U1 Target : "
+  );
+
+  Serial.print(
+    target1,
+    1
+  );
+
+  Serial.println(
+    " cm"
+  );
+
+
+  Serial.print(
+    "U2 Target : "
+  );
+
+  Serial.print(
+    target2,
+    1
+  );
+
+  Serial.println(
+    " cm"
+  );
+
+
+  Serial.print(
+    "Tolerance : +/- "
+  );
+
+  Serial.print(
+    TOLERANCE,
+    1
+  );
+
+  Serial.println(
+    " cm"
+  );
+
+
+  Serial.println(
+    "Button    : GPIO 33"
+  );
+
+
+  Serial.println(
+    "========================================"
+  );
+}
+
+
+// =====================================================
+//                    LOOP
+// =====================================================
+
+void loop() {
+
+
+  // ===================================================
+  // READ ULTRASONIC 1
+  // ===================================================
+
+  float distance1 =
+    readDistance1();
+
+
+  // เว้นระยะเพื่อไม่ให้ Ultrasonic รบกวนกัน
+  delay(30);
+
+
+  // ===================================================
+  // READ ULTRASONIC 2
+  // ===================================================
+
+  float distance2 =
+    readDistance2();
+
+
+  // ===================================================
+  // BUTTON GPIO33
+  // ===================================================
+
+  static bool lastButtonState = HIGH;
+
+  bool buttonState =
+    digitalRead(
+      BUTTON_TARGET
+    );
+
+
+  // ---------------------------------------------------
+  // ตรวจว่ามีการกดปุ่มหรือไม่
+  // ---------------------------------------------------
+
+  if (
+    lastButtonState == HIGH &&
+    buttonState == LOW &&
+    !settingTarget
+  ) {
+
+    settingTarget = true;
+
+    targetSettingStart =
+      millis();
+
+
+    // รีเซ็ตค่าล่าสุด
+    lastDistance1 = -1;
+    lastDistance2 = -1;
+
+
+    Serial.println();
+
+    Serial.println(
+      "========================================"
+    );
+
+    Serial.println(
+      ">>> TARGET SETTING START"
+    );
+
+    Serial.println(
+      "Adjust BOTH sensors for 5 seconds..."
+    );
+
+    Serial.println(
+      "Target will use the LAST reading."
+    );
+
+    Serial.println(
+      "========================================"
+    );
+
+
+    delay(200);
+  }
+
+
+  lastButtonState =
+    buttonState;
+
+
+  // ===================================================
+  // TARGET SETTING 5 SECONDS
+  // ===================================================
+
+  if (
+    settingTarget
+  ) {
+
+    unsigned long elapsed =
+      millis() -
+      targetSettingStart;
+
+
+    // -------------------------------------------------
+    // เก็บ "ค่าล่าสุด" ของ U1
+    // -------------------------------------------------
+
+    if (
+      distance1 > 0
+    ) {
+
+      lastDistance1 =
+        distance1;
+    }
+
+
+    // -------------------------------------------------
+    // เก็บ "ค่าล่าสุด" ของ U2
+    // -------------------------------------------------
+
+    if (
+      distance2 > 0
+    ) {
+
+      lastDistance2 =
+        distance2;
+    }
+
+
+    // -------------------------------------------------
+    // COUNTDOWN
+    // -------------------------------------------------
+
+    static int lastSecond = -1;
+
+    int currentSecond =
+      elapsed / 1000;
+
+
+    if (
+      currentSecond != lastSecond &&
+      currentSecond < 5
+    ) {
+
+      lastSecond =
+        currentSecond;
+
+
+      Serial.print(
+        "Setting Target: "
+      );
+
+      Serial.print(
+        5 - currentSecond
+      );
+
+      Serial.println(
+        " sec"
+      );
+    }
+
+
+    // -------------------------------------------------
+    // ครบ 5 วินาที
+    // -------------------------------------------------
+
+    if (
+      elapsed >= TARGET_SETTING_TIME
+    ) {
+
+      Serial.println();
+
+      Serial.println(
+        ">>> TARGET SETTING COMPLETE"
+      );
+
+
+      // ===============================================
+      // U1 ใช้ค่าล่าสุด
+      // ===============================================
+
+      if (
+        lastDistance1 > 0
+      ) {
+
+        target1 =
+          lastDistance1;
+
+
+        Serial.print(
+          "NEW U1 TARGET = "
+        );
+
+        Serial.print(
+          target1,
+          1
+        );
+
+        Serial.println(
+          " cm"
+        );
+
+      } else {
+
+        Serial.println(
+          "U1 TARGET FAILED"
+        );
+
+        Serial.println(
+          "No valid U1 reading."
+        );
+      }
+
+
+      // ===============================================
+      // U2 ใช้ค่าล่าสุด
+      // ===============================================
+
+      if (
+        lastDistance2 > 0
+      ) {
+
+        target2 =
+          lastDistance2;
+
+
+        Serial.print(
+          "NEW U2 TARGET = "
+        );
+
+        Serial.print(
+          target2,
+          1
+        );
+
+        Serial.println(
+          " cm"
+        );
+
+      } else {
+
+        Serial.println(
+          "U2 TARGET FAILED"
+        );
+
+        Serial.println(
+          "No valid U2 reading."
+        );
+      }
+
+
+      // ===============================================
+      // RESET
+      // ===============================================
+
+      settingTarget = false;
+
+      lastDistance1 = -1;
+      lastDistance2 = -1;
+
+      lastSecond = -1;
+
+
+      Serial.println(
+        "----------------------------------------"
+      );
+
+      Serial.print(
+        "Current U1 Target : "
+      );
+
+      Serial.print(
+        target1,
+        1
+      );
+
+      Serial.println(
+        " cm"
+      );
+
+
+      Serial.print(
+        "Current U2 Target : "
+      );
+
+      Serial.print(
+        target2,
+        1
+      );
+
+      Serial.println(
+        " cm"
+      );
+
+      Serial.println(
+        "========================================"
+      );
+    }
+  }
+
+
+  // ===================================================
+  // CHECK SENSOR STATUS
+  // ===================================================
+
+  bool sensor1OK =
+    isDistanceOK(
+      distance1,
+      target1
+    );
+
+
+  bool sensor2OK =
+    isDistanceOK(
+      distance2,
+      target2
+    );
+
+
+  // ===================================================
+  // SEND DATA TO BOARD 1
+  // ===================================================
+
+  sendData(
+    distance1,
+    distance2
+  );
+
+
+  // ===================================================
+  // SERIAL MONITOR
+  // ===================================================
+
+  static unsigned long lastDisplay = 0;
+
+
+  if (
+    millis() - lastDisplay >= 1000
+  ) {
+
+    lastDisplay =
+      millis();
+
+
+    Serial.println();
+
+    Serial.println(
+      "========================================"
+    );
+
+    Serial.println(
+      "BOARD 2"
+    );
+
+
+    // =================================================
+    // U1
+    // =================================================
+
+    Serial.print(
+      "U1 Distance : "
+    );
+
+
+    if (
+      distance1 < 0
+    ) {
+
+      Serial.println(
+        "ERROR"
+      );
+
+    } else {
+
+      Serial.print(
+        distance1,
+        1
+      );
+
+      Serial.println(
+        " cm"
+      );
+    }
+
+
+    Serial.print(
+      "U1 Target   : "
+    );
+
+    Serial.print(
+      target1,
+      1
+    );
+
+    Serial.println(
+      " cm"
+    );
+
+
+    Serial.print(
+      "U1 Range    : "
+    );
+
+    Serial.print(
+      target1 - TOLERANCE,
+      1
+    );
+
+    Serial.print(
+      " - "
+    );
+
+    Serial.print(
+      target1 + TOLERANCE,
+      1
+    );
+
+    Serial.println(
+      " cm"
+    );
+
+
+    Serial.print(
+      "U1 Status   : "
+    );
+
+    Serial.println(
+      sensor1OK
+      ? "OK"
+      : "NOT OK"
+    );
+
+
+    // =================================================
+    // U2
+    // =================================================
+
+    Serial.print(
+      "U2 Distance : "
+    );
+
+
+    if (
+      distance2 < 0
+    ) {
+
+      Serial.println(
+        "ERROR"
+      );
+
+    } else {
+
+      Serial.print(
+        distance2,
+        1
+      );
+
+      Serial.println(
+        " cm"
+      );
+    }
+
+
+    Serial.print(
+      "U2 Target   : "
+    );
+
+    Serial.print(
+      target2,
+      1
+    );
+
+    Serial.println(
+      " cm"
+    );
+
+
+    Serial.print(
+      "U2 Range    : "
+    );
+
+    Serial.print(
+      target2 - TOLERANCE,
+      1
+    );
+
+    Serial.print(
+      " - "
+    );
+
+    Serial.print(
+      target2 + TOLERANCE,
+      1
+    );
+
+    Serial.println(
+      " cm"
+    );
+
+
+    Serial.print(
+      "U2 Status   : "
+    );
+
+    Serial.println(
+      sensor2OK
+      ? "OK"
+      : "NOT OK"
+    );
+
+
+    // =================================================
+    // OVERALL STATUS
+    // =================================================
+
+    Serial.print(
+      "Overall     : "
+    );
+
+
+    if (
+      !sensor1OK &&
+      !sensor2OK
+    ) {
+
+      Serial.println(
+        "NO PERSON"
+      );
+
+    }
+
+    else if (
+      sensor1OK &&
+      sensor2OK
+    ) {
+
+      Serial.println(
+        "OK"
+      );
+
+    }
+
+    else {
+
+      Serial.println(
+        "WRONG - 1 SENSOR"
+      );
+    }
+
+
+    // =================================================
+    // TARGET SETTING STATUS
+    // =================================================
+
+    Serial.print(
+      "Target Mode : "
+    );
+
+
+    if (
+      settingTarget
+    ) {
+
+      Serial.println(
+        "SETTING"
+      );
+
+    } else {
+
+      Serial.println(
+        "NORMAL"
+      );
+    }
+
+
+    Serial.println(
+      "========================================"
+    );
+  }
+
+
+  delay(100);
+}
